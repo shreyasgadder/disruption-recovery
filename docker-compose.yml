@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: egt_postgres
+    environment:
+      POSTGRES_DB: egt_analytics
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d egt_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - egt_network
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: egt_airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &airflow-env
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/egt_analytics
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 30
+      AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 120
+      AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://airflow:airflow@postgres:5432/egt_analytics
+      PYTHONPATH: /opt/airflow
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+    entrypoint: >
+      bash -c "airflow db migrate && airflow users create --username airflow --password airflow --firstname Admin --lastname User --role Admin --email admin@example.com || true"
+    networks:
+      - egt_network
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: egt_airflow_webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - airflow_logs:/opt/airflow/logs
+    command: airflow webserver
+    restart: unless-stopped
+    networks:
+      - egt_network
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: egt_airflow_scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - airflow_logs:/opt/airflow/logs
+    command: airflow scheduler
+    restart: unless-stopped
+    networks:
+      - egt_network
+
+  spark-streamer:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: egt_spark_streamer
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment: *airflow-env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+      - airflow_logs:/opt/airflow/logs
+    command: python /opt/airflow/src/spark_streamer.py
+    restart: unless-stopped
+    networks:
+      - egt_network
+
+networks:
+  egt_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  airflow_logs:
